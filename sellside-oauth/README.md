@@ -94,6 +94,9 @@ instantáneo: `deploy/rollback-acceso.sh` o rotar la llave de firma.
 
 ## Desplegar
 
+Paso a paso para Cloud Shell, con los bloques listos para pegar:
+[`deploy/CLOUD-SHELL.md`](deploy/CLOUD-SHELL.md). Resumen:
+
 ```bash
 export PROJECT=odoo-serverless-ss-001
 export REGION=southamerica-west1

@@ -4,7 +4,10 @@
 # El PROJECT_NUMBER aparece en las URLs de Cloud Run. Si no lo conoces, este
 # script lo resuelve solo.
 
-set -euo pipefail
+# `set -e` solo al ejecutarlo, no al hacer `source`: si no, en una sesión
+# interactiva el primer comando que falle cierra la terminal. Los scripts que lo
+# cargan ya traen su propio `set -euo pipefail`.
+(return 0 2>/dev/null) || set -euo pipefail
 
 export PROJECT="${PROJECT:-odoo-serverless-ss-001}"
 export REGION="${REGION:-southamerica-west1}"
