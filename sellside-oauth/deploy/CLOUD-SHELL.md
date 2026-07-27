@@ -112,6 +112,37 @@ deploy/02-desplegar-as.sh
 
 `read -rsp` evita que el secreto quede en el historial del shell.
 
+### Si descargaste el JSON del cliente
+
+La consola ofrece un JSON con las credenciales. Solo se usan dos campos, pero
+trae `redirect_uris`, que sirve para verificar el registro antes de desplegar:
+
+```bash
+CLIENT_JSON=~/client_secret_843056793102-XXXX.apps.googleusercontent.com.json
+
+python3 - "$CLIENT_JSON" "$ISSUER" <<'PY'
+import json, sys
+cfg = json.load(open(sys.argv[1]))["web"]
+esperada = f"{sys.argv[2]}/callback/google"
+registradas = cfg.get("redirect_uris", [])
+print("registradas:", registradas)
+print("esperada:   ", esperada)
+print("✓ coincide" if esperada in registradas else "✗ NO coincide — corrígelo en la consola")
+PY
+
+export GOOGLE_CLIENT_ID=$(python3 -c "import json;print(json.load(open('$CLIENT_JSON'))['web']['client_id'])")
+export GOOGLE_CLIENT_SECRET=$(python3 -c "import json;print(json.load(open('$CLIENT_JSON'))['web']['client_secret'])")
+```
+
+Una vez que el secreto está en Secret Manager, el archivo sobra:
+
+```bash
+shred -u "$CLIENT_JSON"
+```
+
+El home de Cloud Shell persiste entre sesiones: un JSON olvidado ahí es un
+secreto en claro en un disco que sobrevive.
+
 Tarda unos minutos: Cloud Build construye la imagen desde el `Dockerfile`.
 
 Comprobación rápida:
