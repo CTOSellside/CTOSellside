@@ -54,21 +54,39 @@ pytest -q
 deactivate
 ```
 
-## 4. Consola: autorizar la redirect URI
+## 4. Consola: crear el cliente OAuth de login
 
 `https://console.cloud.google.com/apis/credentials?project=odoo-serverless-ss-001`
 
-En el cliente OAuth 2.0 existente (tipo *aplicación web*), en **URIs de
-redireccionamiento autorizados**, agregar exactamente la URL del paso 2:
+**Crear credenciales → ID de cliente de OAuth → Aplicación web**
 
-```
-https://sellside-auth-<PROJECT_NUMBER>.southamerica-west1.run.app/callback/google
-```
+| Campo | Valor |
+|---|---|
+| Nombre | `sellside-auth (login MCP)` |
+| URI de redireccionamiento autorizado | la URL exacta que imprimió el paso 2 |
 
-De la misma pantalla salen el **client ID** y el **client secret** para el paso 6.
+Sin orígenes de JavaScript autorizados: el canje del código es servidor a
+servidor, no desde el navegador.
 
-Si el cliente existente no es de tipo aplicación web, crea uno nuevo ahí mismo:
-**Crear credenciales → ID de cliente de OAuth → Aplicación web**.
+**Crea uno nuevo; no reutilices los que ya están.** En este proyecto hay un
+«Web client (auto created by Google Service)» y un cliente de la conexión de
+Gemini Enterprise. El primero lo administra otro servicio de Google y puede
+reescribir sus redirect URIs en cualquier actualización —el login se caería sin
+aviso—; el segundo es de Gemini y no se toca.
+
+De esa misma pantalla salen el **client ID** y el **client secret** del paso 6.
+
+### Pantalla de consentimiento
+
+Si aún no está configurada, la consola la pide antes de dejarte crear el cliente.
+
+**Tipo de usuario → Interno**, si `sellside.cl` es dominio de Workspace: Google
+rechaza cualquier cuenta externa antes de que la petición llegue a tu servicio,
+y queda como segundo filtro independiente de `ALLOWED_EMAIL_DOMAINS`. Con
+*Externo*, tu filtro pasa a ser el único y además Google exige verificación de la
+app para salir de modo prueba.
+
+Scopes: `openid`, `email`, `profile`. Son básicos y no requieren verificación.
 
 ## 5. Inventario e infraestructura
 

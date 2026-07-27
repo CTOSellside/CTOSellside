@@ -17,9 +17,12 @@ acepta registro dinámico de clientes (RFC 7591) ni emite tokens cuyo `audience`
 apunte a un servicio de Cloud Run propio. Identity-Aware Proxy exige que quien
 llama presente un ID token de Google, y Claude no puede hacerlo.
 
-El cliente OAuth de Google que ya existe en el proyecto **sí** se usa aquí,
-pero en su rol legítimo: autenticar personas en la pantalla de consentimiento.
-Google dice *quién eres*; `sellside-auth` decide *qué puedes hacer* en los MCP.
+Un cliente OAuth de Google **sí** se usa aquí, en su rol legítimo: autenticar
+personas en la pantalla de consentimiento. Google dice *quién eres*;
+`sellside-auth` decide *qué puedes hacer* en los MCP. Conviene que sea un cliente
+dedicado y no uno de los que ya están en el proyecto —el «auto created by Google
+Service» lo administra otro servicio y puede reescribir sus redirect URIs—; ver
+[`deploy/CLOUD-SHELL.md`](deploy/CLOUD-SHELL.md), paso 4.
 
 ## Arquitectura
 
@@ -104,7 +107,7 @@ export REGION=southamerica-west1
 deploy/00-inventario.sh          # qué existe hoy (no modifica nada)
 deploy/01-infraestructura.sh     # APIs, Firestore, service account, llave RSA
 
-export GOOGLE_CLIENT_ID=...      # el cliente OAuth que ya existe en el proyecto
+export GOOGLE_CLIENT_ID=...      # cliente OAuth dedicado, creado en la consola
 export GOOGLE_CLIENT_SECRET=...
 deploy/02-desplegar-as.sh        # despliega sellside-auth
 
@@ -226,7 +229,7 @@ identificadores. Los resource servers refrescan al ver un `kid` desconocido.
 ## Pendiente antes de producción
 
 - [x] Issuer definitivo: la URL `*.run.app` (ver «Decisiones que conviene conocer»)
-- [ ] Autorizar `${ISSUER}/callback/google` en el cliente OAuth de Google
+- [ ] Crear el cliente OAuth dedicado con `${ISSUER}/callback/google` autorizado
 - [ ] Integrar el middleware en el código real de `odoo-mcp-sellside`
 - [ ] ACLs de solo lectura (o escritura acotada) en el usuario de Odoo del MCP
 - [ ] Revisar `SEGURIDAD.md` completo antes de correr `05-abrir-acceso.sh`
