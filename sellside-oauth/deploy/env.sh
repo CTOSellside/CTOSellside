@@ -17,8 +17,13 @@ if [[ -z "${PROJECT_NUMBER:-}" ]]; then
   export PROJECT_NUMBER
 fi
 
-# El issuer queda grabado en los metadatos y en cada token emitido. Cambiarlo
-# rompe todas las conexiones existentes: se elige una vez.
+# DECIDIDO: el issuer es la URL *.run.app. Es estable, no depende de que la
+# región soporte mapeo de dominios y no exige balanceador global.
+#
+# Queda grabado en los metadatos publicados y en el claim `iss` de cada token ya
+# emitido: cambiarlo rompe todas las conexiones existentes de Claude. Si algún
+# día hay que mover a auth.sellside.cl, no es editar esta línea — es una
+# migración con reautorización de todos los conectores.
 export ISSUER="${ISSUER:-https://${AUTH_SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app}"
 export MCP_BASE_URL="${MCP_BASE_URL:-https://${MCP_SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app}"
 export RESOURCE_URI="${RESOURCE_URI:-${MCP_BASE_URL}/mcp}"

@@ -66,12 +66,15 @@ servidores de autorización que mantener.
 
 ## Decisiones que conviene conocer
 
-**El `issuer` no se mueve.** Queda grabado en los metadatos y en el claim `iss`
-de cada token emitido. Si cambia, se rompen todas las conexiones existentes.
-`deploy/env.sh` lo fija a la URL `*.run.app`, que es estable. Si prefieres
-`auth.sellside.cl`, decídelo **antes** del primer despliegue: el mapeo de
-dominios de Cloud Run no está disponible en todas las regiones y puede que
-necesites un balanceador global.
+**El `issuer` es `https://sellside-auth-<PROJECT_NUMBER>.southamerica-west1.run.app`
+y no se mueve.** Decidido: la URL `*.run.app` es estable, no depende de que la
+región soporte mapeo de dominios de Cloud Run y no obliga a montar un
+balanceador global. `deploy/env.sh` la fija.
+
+Queda grabada en los metadatos y en el claim `iss` de cada token emitido, así
+que cambiarla rompe todas las conexiones existentes. Migrar a `auth.sellside.cl`
+más adelante no sería editar una variable: sería levantar el dominio, mantener
+ambos issuers durante la transición y reautorizar cada conector.
 
 **Un `resource` por token.** El endpoint rechaza múltiples valores de `resource`
 en `/authorize`: un token con dos audiencias es un token que sirve en dos
@@ -219,7 +222,7 @@ identificadores. Los resource servers refrescan al ver un `kid` desconocido.
 
 ## Pendiente antes de producción
 
-- [ ] Elegir issuer definitivo (`*.run.app` o dominio propio) — decisión irreversible
+- [x] Issuer definitivo: la URL `*.run.app` (ver «Decisiones que conviene conocer»)
 - [ ] Autorizar `${ISSUER}/callback/google` en el cliente OAuth de Google
 - [ ] Integrar el middleware en el código real de `odoo-mcp-sellside`
 - [ ] ACLs de solo lectura (o escritura acotada) en el usuario de Odoo del MCP
