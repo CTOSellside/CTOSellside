@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import httpx
 import jwt
 
 from .conftest import (
@@ -403,3 +404,37 @@ async def test_cliente_publico_no_debe_mandar_secreto(client):
     )
     assert response.status_code == 401
     assert response.json()["error"] == "invalid_client"
+
+
+async def test_recortar_scopes_supported_afecta_a_los_refresh_vivos(client, storage):
+    """Quitar un scope del AS debe cortar la renovación, no esperar 30 días.
+
+    Es el caso operativo real: alguien concedió `odoo:write`, luego se decide que
+    el conector solo lea, y el refresh token vivo no puede seguir emitiendo
+    tokens de escritura.
+    """
+
+    from auth_server.app import create_app
+    from auth_server.identity import DevIdentityProvider
+
+    from .conftest import ISSUER, make_settings
+
+    tokens, client_id = await _token_for(client, scope="odoo:read odoo:write")
+
+    restringido = create_app(
+        make_settings(scopes_supported=("odoo:read", "offline_access")),
+        storage=storage,                      # mismo estado, otra configuración
+        identity_provider=DevIdentityProvider(),
+    )
+    transport = httpx.ASGITransport(app=restringido)
+    async with httpx.AsyncClient(transport=transport, base_url=ISSUER) as http:
+        response = await http.post(
+            "/token",
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": tokens["refresh_token"],
+                "client_id": client_id,
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["scope"] == "odoo:read"   # `odoo:write` ya no sale

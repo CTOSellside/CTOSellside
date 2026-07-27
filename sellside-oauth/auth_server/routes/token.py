@@ -116,13 +116,27 @@ async def _refresh_token_grant(context: AppContext, client: Client, form: dict) 
     if not secrets.compare_digest(stored.client_id, client.client_id):
         raise InvalidGrant("El refresh token fue emitido para otro cliente")
 
-    scope = stored.scope
+    # Un scope retirado de la configuración deja de emitirse aunque el refresh
+    # token lo llevara. Sin esto, reducir SCOPES_SUPPORTED no surte efecto hasta
+    # que caduquen todos los refresh vivos —treinta días por defecto—, que es
+    # justo lo contrario de lo que espera quien acaba de recortar un permiso.
+    concedidos = set(stored.scope.split()) & set(context.settings.scopes_supported)
+    if not concedidos:
+        raise InvalidScope(
+            "Ninguno de los scopes de este token sigue habilitado en el servidor; "
+            "hay que volver a autorizar"
+        )
+
     requested_scope = form.get("scope")
     if requested_scope:
         requested = set(str(requested_scope).split())
         if not requested <= set(stored.scope.split()):
             raise InvalidScope("Un refresh solo puede reducir el scope, nunca ampliarlo")
-        scope = " ".join(sorted(requested))
+        concedidos &= requested
+        if not concedidos:
+            raise InvalidScope("Los scopes pedidos ya no están habilitados en el servidor")
+
+    scope = " ".join(sorted(concedidos))
 
     resource = _requested_resource(form, default=stored.resource)
     if resource != stored.resource:
