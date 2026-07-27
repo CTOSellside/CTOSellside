@@ -1,15 +1,31 @@
 #!/usr/bin/env bash
 # Fase 2 — desplegar sellside-auth en Cloud Run.
 #
-# GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET son el cliente OAuth que ya existe en
-# el proyecto; acá sí corresponde usarlo, para autenticar personas en la
-# pantalla de consentimiento. Su redirect URI autorizada debe ser:
+# GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET son el cliente OAuth dedicado que
+# autentica personas en la pantalla de consentimiento. Su redirect URI
+# autorizada debe ser:
 #   ${ISSUER}/callback/google
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
 
 : "${GOOGLE_CLIENT_ID:?exporta GOOGLE_CLIENT_ID antes de desplegar}"
 : "${GOOGLE_CLIENT_SECRET:?exporta GOOGLE_CLIENT_SECRET antes de desplegar}"
+
+# Un client_id con la forma equivocada no rompe el despliegue: rompe el login,
+# al final del flujo, con un `invalid_client` de Google que no dice de dónde
+# sale. Más barato cortar acá.
+if [[ ! "$GOOGLE_CLIENT_ID" =~ ^[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com$ ]]; then
+  echo "GOOGLE_CLIENT_ID no tiene forma de client ID de Google:" >&2
+  echo "  $GOOGLE_CLIENT_ID" >&2
+  echo "Se espera: <número de proyecto>-<alfanumérico>.apps.googleusercontent.com" >&2
+  echo "Cópialo de https://console.cloud.google.com/apis/credentials?project=${PROJECT}" >&2
+  exit 1
+fi
+if [[ ${#GOOGLE_CLIENT_SECRET} -lt 20 ]]; then
+  echo "GOOGLE_CLIENT_SECRET parece truncado (${#GOOGLE_CLIENT_SECRET} caracteres)." >&2
+  echo "Los secretos de Google rondan los 35 y empiezan por GOCSPX-." >&2
+  exit 1
+fi
 
 ALLOWED_EMAIL_DOMAINS="${ALLOWED_EMAIL_DOMAINS:-sellside.cl}"
 PROTECTED_RESOURCES="${PROTECTED_RESOURCES:-$RESOURCE_URI}"
