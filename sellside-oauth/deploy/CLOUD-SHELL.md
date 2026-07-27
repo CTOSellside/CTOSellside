@@ -114,13 +114,21 @@ deploy/02-desplegar-as.sh
 
 ### Si descargaste el JSON del cliente
 
-La consola ofrece un JSON con las credenciales. Solo se usan dos campos, pero
-trae `redirect_uris`, que sirve para verificar el registro antes de desplegar:
+La descarga de la consola va a tu equipo, no a Cloud Shell: primero súbelo con
+**⋮ → Subir → Archivo**.
+
+Solo se usan dos campos, pero el archivo trae `redirect_uris`, que sirve para
+verificar el registro antes de desplegar en vez de descubrir el desajuste a
+mitad del login:
 
 ```bash
-CLIENT_JSON=~/client_secret_843056793102-XXXX.apps.googleusercontent.com.json
+CLIENT_JSON=$(ls -t ~/client_secret*.json ~/*.apps.googleusercontent.com.json 2>/dev/null | head -1)
 
-python3 - "$CLIENT_JSON" "$ISSUER" <<'PY'
+if [[ -z "$CLIENT_JSON" ]]; then
+  echo "No encontré el JSON en ~. Súbelo con ⋮ → Subir → Archivo"
+else
+  echo "usando: $CLIENT_JSON"
+  python3 - "$CLIENT_JSON" "$ISSUER" <<'PY'
 import json, sys
 cfg = json.load(open(sys.argv[1]))["web"]
 esperada = f"{sys.argv[2]}/callback/google"
@@ -129,10 +137,16 @@ print("registradas:", registradas)
 print("esperada:   ", esperada)
 print("✓ coincide" if esperada in registradas else "✗ NO coincide — corrígelo en la consola")
 PY
-
-export GOOGLE_CLIENT_ID=$(python3 -c "import json;print(json.load(open('$CLIENT_JSON'))['web']['client_id'])")
-export GOOGLE_CLIENT_SECRET=$(python3 -c "import json;print(json.load(open('$CLIENT_JSON'))['web']['client_secret'])")
+  export GOOGLE_CLIENT_ID=$(python3 -c "import json;print(json.load(open('$CLIENT_JSON'))['web']['client_id'])")
+  export GOOGLE_CLIENT_SECRET=$(python3 -c "import json;print(json.load(open('$CLIENT_JSON'))['web']['client_secret'])")
+  [[ -n "$GOOGLE_CLIENT_ID" && -n "$GOOGLE_CLIENT_SECRET" ]] \
+    && echo "✓ credenciales cargadas: $GOOGLE_CLIENT_ID" \
+    || echo "✗ el JSON no tiene la forma esperada (¿es de tipo 'web'?)"
+fi
 ```
+
+La comprobación final no sobra: `export VAR=$(comando_que_falla)` deja la
+variable vacía y el shell continúa sin quejarse.
 
 Una vez que el secreto está en Secret Manager, el archivo sobra:
 
