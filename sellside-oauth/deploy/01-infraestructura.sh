@@ -29,12 +29,38 @@ if gcloud iam service-accounts describe "$AUTH_SA" >/dev/null 2>&1; then
 else
   gcloud iam service-accounts create sellside-auth \
     --display-name="OAuth AS para los MCP"
+
+  # IAM no es inmediatamente consistente: la cuenta recién creada tarda unos
+  # segundos en ser visible para add-iam-policy-binding, que falla con un
+  # "does not exist" desconcertante.
+  echo -n "   esperando a que propague"
+  for _ in $(seq 1 20); do
+    if gcloud iam service-accounts describe "$AUTH_SA" >/dev/null 2>&1; then break; fi
+    echo -n "."
+    sleep 3
+  done
+  echo
 fi
 
-gcloud projects add-iam-policy-binding "$PROJECT" \
-  --member="serviceAccount:${AUTH_SA}" \
-  --role="roles/datastore.user" \
-  --condition=None >/dev/null
+echo "== Permiso de Firestore =="
+for intento in $(seq 1 6); do
+  if gcloud projects add-iam-policy-binding "$PROJECT" \
+      --member="serviceAccount:${AUTH_SA}" \
+      --role="roles/datastore.user" \
+      --condition=None >/dev/null 2>&1; then
+    echo "   roles/datastore.user concedido"
+    break
+  fi
+  if [[ $intento -eq 6 ]]; then
+    echo "   no se pudo conceder roles/datastore.user tras 6 intentos" >&2
+    gcloud projects add-iam-policy-binding "$PROJECT" \
+      --member="serviceAccount:${AUTH_SA}" \
+      --role="roles/datastore.user" --condition=None
+    exit 1
+  fi
+  echo "   reintentando ($intento/6)…"
+  sleep 5
+done
 
 echo "== Llave de firma de los JWT =="
 if gcloud secrets describe "$JWT_SECRET_NAME" >/dev/null 2>&1; then
