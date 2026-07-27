@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import unicodedata
 from collections.abc import Awaitable, Callable
 
 from .config import ResourceConfig
@@ -35,9 +36,9 @@ def protected_resource_metadata(config: ResourceConfig) -> dict:
 
 
 def www_authenticate(config: ResourceConfig, error: str | None = None, description: str = "") -> str:
-    parts = [f'Bearer realm="{config.resource_name}"']
+    parts = [f'Bearer realm="{_quote(config.resource_name)}"']
     if error:
-        parts.append(f'error="{error}"')
+        parts.append(f'error="{_quote(error)}"')
         if description:
             parts.append(f'error_description="{_quote(description)}"')
     # Sin este parámetro el cliente no sabe dónde autenticarse: es lo que
@@ -47,7 +48,21 @@ def www_authenticate(config: ResourceConfig, error: str | None = None, descripti
 
 
 def _quote(value: str) -> str:
-    return value.replace("\\", "").replace('"', "'").replace("\n", " ")
+    """Deja el valor en ASCII imprimible, apto para una cabecera HTTP.
+
+    RFC 7230 limita los valores de cabecera a ASCII. Google Frontend no se
+    limita a recortar el carácter ofensivo: descarta la cabecera **entera**, y
+    con ella se va `resource_metadata` — el cliente recibe un 401 que no le dice
+    dónde autenticarse y el flujo OAuth no arranca nunca. Como los mensajes de
+    error de esta librería están en español, esto no es hipotético.
+
+    Se translitera («expiró» → «expiro») en vez de descartar, para no dejar
+    palabras mutiladas en el mensaje.
+    """
+
+    plano = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
+    limpio = plano.replace("\\", "").replace('"', "'")
+    return " ".join(limpio.split())
 
 
 class BearerAuthMiddleware:

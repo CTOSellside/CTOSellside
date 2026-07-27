@@ -117,6 +117,40 @@ async def test_token_expirado_se_rechaza(mcp_client):
     assert "expiró" in response.json()["error_description"]
 
 
+@pytest.mark.parametrize(
+    "token_factory",
+    [
+        lambda: mint_token(iat=int(time.time()) - 7200, exp=int(time.time()) - 3600),
+        lambda: mint_token(aud=OTHER_RESOURCE),
+        lambda: mint_token(iss="https://as.ajeno.test"),
+        lambda: "no-es-un-jwt",
+    ],
+    ids=["expirado", "otra-audiencia", "otro-issuer", "basura"],
+)
+async def test_www_authenticate_es_ascii_puro(mcp_client, token_factory):
+    """Las cabeceras son ASCII (RFC 7230).
+
+    Los mensajes de error de esta librería están en español y terminan dentro de
+    `WWW-Authenticate`. Google Frontend no recorta el carácter ofensivo: descarta
+    la cabecera entera, y con ella `resource_metadata`. El cliente recibiría un
+    401 sin saber dónde autenticarse y el flujo OAuth no arrancaría.
+    """
+
+    response = await mcp_client.post(
+        "/mcp", json={}, headers={"authorization": f"Bearer {token_factory()}"}
+    )
+    challenge = response.headers["www-authenticate"]
+    assert challenge.isascii(), f"cabecera con bytes no-ASCII: {challenge!r}"
+    assert "resource_metadata=" in challenge
+    # El cuerpo JSON sí puede llevar acentos: va en UTF-8 y nadie lo filtra.
+    assert response.json()["error_description"]
+
+
+async def test_challenge_sin_token_tambien_es_ascii(mcp_client):
+    response = await mcp_client.post("/mcp", json={})
+    assert response.headers["www-authenticate"].isascii()
+
+
 async def test_alg_none_se_rechaza(mcp_client):
     forged = jwt.encode(
         {"iss": ISSUER, "sub": "atacante", "aud": RESOURCE, "scope": "odoo:write",
