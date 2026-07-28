@@ -427,6 +427,122 @@ usuario final**, así que los permisos de Odoo y la pista de auditoría son los 
 esa persona, no los de una cuenta de servicio compartida. Es el argumento
 comercial más fuerte del diseño.
 
+### 3.10 Configuración desplegada hoy — verificada
+
+`gcloud run services describe odoo-mcp-sellside --region southamerica-west1
+--project odoo-serverless-ss-001`, ejecutado el 28-jul-2026. Revisión activa
+`odoo-mcp-sellside-00016-zdv`, última actualización 28-jul-2026 00:33 UTC.
+
+| Parámetro | Valor desplegado | Observación |
+|---|---|---|
+| Imagen | `…/cloud-run-source-deploy/odoo-mcp-sellside:oauth21` | Tag manual, no un SHA |
+| Puerto | 8080 | `MCP_PORT=8080` coherente |
+| Recursos | 512 Mi / 1000 m | |
+| Concurrencia | 80 | |
+| Timeout | 300 s | Menor que el de arranque del propio servicio |
+| Ingress | `all` | Alcanzable desde internet |
+| **Escalado** | **Min 0 / Max 1** a nivel de servicio, **Max 5** en la anotación de revisión | Ver más abajo |
+| **Volúmenes** | **Ninguno** | Confirma §6.3 |
+| **Service account** | **`843056793102-compute@developer.gserviceaccount.com`** | La **default de compute** |
+| Startup probe | TCP cada 240 s, timeout 240 s, umbral 1 | No usa `/health` |
+
+**Variables de entorno:** `MODE=http`, `MCP_PORT=8080`, `AUTH_SERVER`,
+`RESOURCE_URI`, `RESOURCE_NAME`, `SCOPES_SUPPORTED=odoo:read,odoo:write`.
+
+**Secretos:** `ODOO_URL`, `ODOO_DB`, `ODOO_USERNAME` y `ODOO_API_KEY` ← este
+último mapeado desde el secreto **`SELLSIDE_ODOO_PASSWORD`**.
+
+De aquí salen seis lecturas, en orden de gravedad.
+
+#### (a) Contradicción: faltan dos variables que el código exige
+
+`MODE=http` está puesto, pero **`MCP_ENCRYPTION_KEY` y `MCP_ADMIN_PASSWORD` no
+están definidas** — ni como variable ni como secreto.
+
+Según `config.ts:94-115`, esa combinación termina en `process.exit(1)` antes de
+abrir el puerto:
+
+```ts
+if (parsed.MODE === 'http' && (parsed.MCP_ENCRYPTION_KEY === undefined ||
+    Buffer.from(parsed.MCP_ENCRYPTION_KEY, 'base64').length !== 32)) {
+  process.stderr.write(JSON.stringify({event:'config_error', missing:['MCP_ENCRYPTION_KEY']}));
+  process.exit(1);
+}
+```
+
+Es una guarda incondicional. No hay ruta por la que v0.2.2 arranque en modo HTTP
+sin esas dos variables. Y sin embargo el servicio existe y el conector de Odoo
+responde. Solo tres explicaciones son compatibles con ambos hechos:
+
+1. **La imagen `:oauth21` no es v0.2.2.** El tag sugiere «OAuth 2.1», que es
+   v0.2.1 — pero v0.2.1 tiene la misma guarda documentada en
+   `docs/v0.2.1-oauth.md:32-36`. Encajaría mejor **v0.2.0**, cuyo modo HTTP usaba
+   `MCP_BEARER_TOKEN` estático… que tampoco está puesto.
+2. **La imagen es un build modificado** de Sellside que relajó la validación.
+   Plausible dado que el tag es manual, pero **ese build no está en ningún
+   repositorio** (§Anexo A).
+3. **El servicio está caído** y el conector que funciona apunta a otro sitio.
+
+**No puedo distinguir entre las tres desde aquí.** Los esquemas del conector vivo
+prueban qué *código* responde (§3.1), no qué *servicio* lo aloja — es una
+inferencia que di por hecha y que este `describe` pone en duda. Cómo resolverlo,
+en el [Anexo A](#anexo-a--qué-verifiqué-y-qué-no).
+
+#### (b) `Min: 0` — el arranque en frío es rutina, no excepción
+
+El servicio escala a cero. Combinado con la ausencia de volúmenes, esto convierte
+el defecto de §6.3 de «se pierde si reinicia» a **«se pierde cada vez que el
+servicio queda ocioso»**. Si la pieza A es la que corre, todo usuario que vuelva
+después de un rato de inactividad recibe 401 y tiene que rehacer el flujo OAuth.
+
+Esto encaja con la explicación (a.2): un build que quitó la validación
+probablemente también prescindió del user store, porque con `Min: 0` sería
+inusable.
+
+#### (c) El escalado se contradice consigo mismo
+
+`Scaling: Auto (Min: 0, Max: 1)` a nivel de servicio, pero
+`Scaling: Max instances: 5` en la anotación de la revisión. El valor de servicio
+manda sobre el de revisión, así que el efectivo debería ser **1** — pero conviene
+confirmarlo, porque el 5 es exactamente lo que fija
+`03-configurar-mcp.sh:11-12`.
+
+#### (d) El script 03 sí se ejecutó, sobre el servicio equivocado
+
+`AUTH_SERVER`, `RESOURCE_URI`, `RESOURCE_NAME` y `SCOPES_SUPPORTED` son
+literalmente las cuatro variables que fija `03-configurar-mcp.sh:15-17`. Están
+puestas. El script corrió.
+
+Pero esas variables las consume el middleware **Python** de `sellside-oauth`, y
+la validación de entorno de la pieza A (`config.ts:19-39`) ni las conoce — zod
+descarta las claves desconocidas en silencio. Es exactamente lo que el propio
+script advierte en su cabecera: *«lo único que consigues es un servicio con
+variables de entorno bonitas»*. El desajuste Node/Python de §5 no es teórico:
+**ya se materializó en producción**.
+
+#### (e) Corre con la service account default de compute
+
+`843056793102-compute@developer.gserviceaccount.com` trae por defecto el rol
+`Editor` sobre todo el proyecto. Un compromiso del MCP no se queda en Odoo: se
+lleva el proyecto entero.
+
+Es precisamente contra esto que `01-infraestructura.sh:25-26` deja escrito *«No
+se usa la default de compute: toda la flota cuelga de ella y no conviene darle
+otro rol crítico»*. La recomendación existe y no se aplicó a este servicio.
+
+#### (f) El secreto se llama `SELLSIDE_ODOO_PASSWORD`
+
+`ODOO_API_KEY` se alimenta del secreto `SELLSIDE_ODOO_PASSWORD`. El nombre puede
+ser solo herencia, pero si el valor **es la contraseña web** del usuario y no una
+clave API:
+
+- No se puede revocar sin cambiarle la contraseña a la persona.
+- Sirve para entrar por la interfaz web de Odoo, no solo por RPC.
+- No aparece en el listado de claves API, así que no hay rastro de su existencia.
+
+El diseño de la pieza A asume una clave API por usuario, revocable de forma
+independiente (`README.md:38-42`). Vale la pena confirmar qué hay dentro.
+
 ---
 
 ## 4. Pieza B — el MCP de Rosa Control Center
@@ -557,11 +673,16 @@ todas verificables en el código:
    fallara, `doFlush` no relanza — loguea y sigue (`:122-128`). Nada en `/health`
    lo delata.
 
-Hay una señal de que esto ya se topó en producción:
-`sellside-oauth/deploy/03-configurar-mcp.sh:10` dice literalmente
-*«Subiendo el techo de concurrencia (hoy max-instances=1)»* — el servicio está
-fijado en una sola instancia. **Y ese mismo script lo sube a 5**, lo que
-introduciría el problema 2 tal cual está escrito.
+**Confirmado en el despliegue actual** (§3.10): el servicio **no tiene ningún
+volumen montado** y corre con **`Min: 0`**. Es decir, el escenario 1 no es un
+riesgo latente — ocurre cada vez que el servicio queda ocioso y escala a cero.
+
+> Con una salvedad importante: §3.10(a) muestra que faltan `MCP_ENCRYPTION_KEY` y
+> `MCP_ADMIN_PASSWORD`, sin las cuales la pieza A no arranca en modo HTTP. Si lo
+> desplegado es un build modificado, es probable que también haya prescindido del
+> user store —sería inusable con `Min: 0`— y entonces este defecto no aplica al
+> despliegue actual **pero sigue aplicando a cualquier réplica** que use el código
+> del fork tal cual, que es de lo que trata esta sección.
 
 #### Opciones, de menos a más trabajo
 
@@ -759,26 +880,36 @@ Ordenados por lo que le pasa al cliente si no se atienden.
 
 | # | Riesgo | Impacto | Dónde |
 |---|---|---|---|
-| 1 | **User store efímero en Cloud Run** | Pérdida de tokens y allowlist en cada arranque en frío; comportamiento intermitente si `max-instances > 1` | §6.3 |
+| 1 | **No se sabe qué código corre en `odoo-mcp-sellside`** | Faltan dos variables sin las cuales el fork no arranca. La imagen `:oauth21` no está en ningún repo. No se puede auditar ni reproducir lo que hoy toca los datos de Odoo | §3.10(a) |
 | 2 | **`/mcp/sse` de Rosa sin autenticación** | Escritura y borrado en Odoo MOM desde internet, sin credencial | §4 |
-| 3 | **Los access tokens no expiran** | Un token filtrado sirve hasta que alguien lo revoque a mano | `docs/v0.2.1-oauth.md:146` |
-| 4 | Rotación destructiva de `MCP_ENCRYPTION_KEY` | Rotar por higiene obliga a que todos reautoricen | `user-store.ts:317-334` |
-| 5 | Desajuste Node/Python del PR #1 | Trabajo hecho que no se puede integrar tal cual | §5 |
-| 6 | `03-configurar-mcp.sh` sube `max-instances` a 5 | Dispara el riesgo 1 si se ejecuta hoy | `deploy/03-configurar-mcp.sh:11-12` |
-| 7 | Bug de concurrencia SSE en Rosa | Mensajes cruzados entre clientes | `mcp.routes.js:6` |
-| 8 | Dependencia de un fork upstream | Los parches de seguridad de NETLINKS no llegan solos | `CTOSellside/odoo-mcp` |
-| 9 | El despliegue no está versionado | Ver Anexo A | — |
-| 10 | `resolveToken` es O(n) | Irrelevante hoy (n ≤ 10 × usuarios); no escala a miles | `user-store.ts:250-257` |
+| 3 | **Corre con la service account default de compute** | Rol `Editor` sobre todo el proyecto: un compromiso del MCP no se queda en Odoo | §3.10(e) |
+| 4 | **User store efímero + `Min: 0`** | Si corre la pieza A: pérdida de tokens y allowlist en cada escalado a cero. Aplica con certeza a la réplica | §6.3, §3.10(b) |
+| 5 | `ODOO_API_KEY` viene de `SELLSIDE_ODOO_PASSWORD` | Si es la contraseña web y no una clave API: no es revocable por separado y sirve para entrar por la UI | §3.10(f) |
+| 6 | **Los access tokens no expiran** | Un token filtrado sirve hasta que alguien lo revoque a mano | `docs/v0.2.1-oauth.md:146` |
+| 7 | Desajuste Node/Python del PR #1 | Ya materializado: el script 03 dejó variables inertes en producción | §5, §3.10(d) |
+| 8 | Startup probe TCP en vez de `/health` | Un contenedor que abre el puerto pero falla el sondeo a Odoo se marca sano | §3.10 |
+| 9 | Escalado contradictorio (Max 1 vs 5) | Si el efectivo fuera 5, dispara el riesgo 4 | §3.10(c) |
+| 10 | Rotación destructiva de `MCP_ENCRYPTION_KEY` | Rotar por higiene obliga a que todos reautoricen | `user-store.ts:317-334` |
+| 11 | Bug de concurrencia SSE en Rosa | Mensajes cruzados entre clientes | `mcp.routes.js:6` |
+| 12 | Dependencia de un fork upstream | Los parches de seguridad de NETLINKS no llegan solos | `CTOSellside/odoo-mcp` |
+| 13 | `resolveToken` es O(n) | Irrelevante hoy (n ≤ 10 × usuarios); no escala a miles | `user-store.ts:250-257` |
 
-**Los tres primeros son los que importan.** El 1 y el 2 antes de replicar; el 3
-antes de que un cliente con auditoría pregunte.
+**Los tres primeros son los que importan, y el orden cambió** tras verificar el
+despliegue: el 1 es ahora el más grave, porque mientras no se sepa qué imagen
+corre no se puede afirmar nada sobre la seguridad del sistema en producción —
+incluido si tiene autenticación.
 
 ---
 
 ## 9. Recomendación
 
+0. **Identificar qué corre en `odoo-mcp-sellside`** (§3.10a y Anexo A). Va antes
+   que todo lo demás: sin eso, ninguna afirmación sobre la seguridad del sistema
+   actual —incluida la de si está autenticado— se sostiene. Son tres comandos.
 1. **Cerrar `/mcp/*` de Rosa Control Center.** Es una exposición activa, no una
    deuda. No espera a la réplica.
+1b. **Darle al MCP una service account dedicada** en vez de la default de
+   compute, con permisos mínimos. Es un `gcloud run services update`.
 2. **Portar `UserStore` a Firestore** (opción C de §6.3). Es lo que convierte
    esto de «funciona en una instancia» a «producto replicable».
 3. **Para el primer cliente replicado, Opción 1** — OAuth embebido, un proyecto,
@@ -807,31 +938,51 @@ leído de lo supuesto no sirve para decidir.
   referencia `archivo:línea` de este documento apunta a ese commit.
 - Toda la pieza B: `rosa-control-center` en `9e54001`, incluido `cloudbuild.yaml`.
 - Pieza C: rama `claude/oauth-mcp-sellside-gcp-gg30q6` del PR #1.
-- **Que el conector vivo `Rosa_Odoo_MCP_GCP` corre la pieza A**: los esquemas
-  expuestos coinciden con `schemas.ts` en regex, defaults y cadenas de
-  descripción (§3.1).
+- **Que el conector vivo `Rosa_Odoo_MCP_GCP` corre el *código* de la pieza A**:
+  los esquemas expuestos coinciden con `schemas.ts` en regex, defaults y cadenas
+  de descripción (§3.1). Esto identifica el código, **no el servicio que lo
+  aloja** — ver el punto 1 de abajo.
+- **La configuración desplegada de `odoo-mcp-sellside`** (§3.10), vía
+  `gcloud run services describe` el 28-jul-2026.
 
 ### No verificado — supuestos declarados
 
-1. **El artefacto exacto desplegado en `odoo-mcp-sellside`.** El fork no contiene
-   configuración de despliegue para GCP: solo `Dockerfile` y `fly.toml`. **Cómo
-   llegó ese código a Cloud Run no está en ningún repositorio que pueda ver.**
-   Presumo `gcloud run deploy --source .` a mano. Consecuencia práctica: el
-   despliegue no es reproducible desde control de versiones, y la réplica del
-   §6.5 es mi reconstrucción, no una copia de un pipeline existente.
+1. **Qué imagen corre realmente, y si el conector vivo apunta a este servicio.**
+   Este es ahora el supuesto crítico, y lo abrió el propio `describe`: el
+   servicio tiene `MODE=http` pero **le faltan `MCP_ENCRYPTION_KEY` y
+   `MCP_ADMIN_PASSWORD`**, sin las cuales el código del fork sale con código 1
+   antes de abrir el puerto (`config.ts:94-115`). Ver §3.10(a) para las tres
+   explicaciones posibles.
 
-2. **La configuración viva del servicio.** `min-instances`, `max-instances`, las
-   variables de entorno reales y si `MCP_USER_STORE_PATH` está apuntando a algún
-   volumen montado. Lo de `max-instances=1` sale del comentario en
-   `03-configurar-mcp.sh:10`, no de consultar el servicio. **Verificable en un
-   minuto** con:
+   Yo di por hecho que el conector `Rosa_Odoo_MCP_GCP` apuntaba a
+   `odoo-mcp-sellside`; los esquemas prueban qué código responde, no dónde vive.
+   **Tres comandos lo resuelven:**
    ```bash
-   gcloud run services describe odoo-mcp-sellside \
-     --region southamerica-west1 --project odoo-serverless-ss-001
+   # 1. ¿Está vivo y qué dice de sí mismo?
+   curl -s https://odoo-mcp-sellside-843056793102.southamerica-west1.run.app/health
+   #    {"ok":true,"mode":"http","probe_ok":true}  → la pieza A está corriendo
+   #    503 / error / vacío                        → está caído: el conector va a otro sitio
+
+   # 2. ¿Se está reiniciando por config_error?
+   gcloud run services logs read odoo-mcp-sellside \
+     --region southamerica-west1 --limit 50 | grep -i "config_error\|startup_error"
+
+   # 3. ¿Exige token?  (debe responder 401 + WWW-Authenticate)
+   curl -si -X POST \
+     https://odoo-mcp-sellside-843056793102.southamerica-west1.run.app/mcp | head -5
    ```
-   Si ese comando muestra un volumen persistente montado, el riesgo 1 de §8 no
-   aplica al despliegue actual —aunque sí seguiría aplicando a la réplica, que
-   habría que configurar igual.
+   El comando 3 es el que de verdad importa: si **no** devuelve 401, hay un MCP
+   con `odoo_write` y `odoo_unlink` abierto a internet, y el riesgo 2 de §8 tiene
+   un hermano peor. Y conviene contrastar la URL del comando 1 con la que está
+   configurada en el conector de Claude.
+
+2. **El artefacto exacto detrás del tag `:oauth21`.** El fork no contiene
+   configuración de despliegue para GCP: solo `Dockerfile` y `fly.toml`. **Cómo
+   llegó ese código a Cloud Run no está en ningún repositorio que pueda ver**, y
+   el tag es manual, no un SHA de commit. Consecuencia práctica: lo que hoy toca
+   los datos de Odoo **no es auditable ni reproducible**. La réplica del §6.5 es
+   mi reconstrucción a partir del código del fork, no la copia de un pipeline
+   existente.
 
 3. **Si `/mcp/sse` de Rosa está efectivamente alcanzable desde internet.** Lo
    deduzco de `--allow-unauthenticated` en `cloudbuild.yaml:27` más la ausencia
@@ -842,6 +993,14 @@ leído de lo supuesto no sirve para decidir.
 4. **El segundo proyecto GCP.** Solo conozco su número, `30942737227`, por las
    URLs en el código. No sé su ID ni su relación organizativa con
    `odoo-serverless-ss-001`.
+
+4b. **La política IAM del servicio.** `Ingress: all` confirma que la red lo
+   permite, pero `describe` no muestra los bindings. Falta:
+   ```bash
+   gcloud run services get-iam-policy odoo-mcp-sellside --region southamerica-west1
+   ```
+   Si aparece `allUsers` con `roles/run.invoker`, la única protección es el
+   código — y el punto 1 dice que no sabemos cuál es.
 
 5. **Cuántos usuarios usan hoy el conector** y con qué frecuencia. Determina si
    la opción A de §6.3 es tolerable como estado transitorio o ya está causando
