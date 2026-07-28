@@ -987,31 +987,42 @@ leído de lo supuesto no sirve para decidir.
    tiene sus variables.
 
    El fork no contiene configuración de despliegue para GCP —solo `Dockerfile` y
-   `fly.toml`— y el tag es manual, no un SHA. **Pero el nombre del repositorio de
-   Artifact Registry, `cloud-run-source-deploy`, indica un despliegue `--source`,
-   y eso deja rastro.** Para recuperarlo:
+   `fly.toml`— y el tag es manual, no un SHA.
+
+   **Vía de recuperación (garantizada).** El `Dockerfile` del fork hace `COPY . .`
+   **antes** de compilar (`Dockerfile:18`), así que la imagen contiene el árbol de
+   fuentes TypeScript completo, no solo el `dist`:
    ```bash
-   # ¿Cuándo se construyó la imagen y qué otras hay?
-   gcloud artifacts docker images list \
-     southamerica-west1-docker.pkg.dev/odoo-serverless-ss-001/cloud-run-source-deploy/odoo-mcp-sellside \
-     --include-tags --format='table(version,tags,createTime)'
-
-   # El build que la produjo — `source` apunta al tarball del fuente
-   gcloud builds list --limit 20 \
-     --format='table(id,createTime,status,source.storageSource.bucket,source.storageSource.object)'
-
-   # Y se descarga:
-   gsutil cp gs://<bucket>/<object> /tmp/fuente-oauth21.tgz
+   IMG=southamerica-west1-docker.pkg.dev/odoo-serverless-ss-001/cloud-run-source-deploy/odoo-mcp-sellside:oauth21
+   gcloud auth configure-docker southamerica-west1-docker.pkg.dev -q
+   docker pull -q "$IMG"
+   mkdir -p /tmp/oauth21 && docker run --rm --entrypoint sh "$IMG" -c \
+     'cd /app && tar c --exclude=node_modules packages/*/src packages/odoo-mcp/package.json Dockerfile' \
+     | tar x -C /tmp/oauth21
+   git clone --depth 1 https://github.com/CTOSellside/odoo-mcp /tmp/upstream
+   diff -ru /tmp/upstream/packages /tmp/oauth21/packages
    ```
-   Si el tarball aparece, **eso es el fuente perdido**: se descomprime, se
-   diffea contra `CTOSellside/odoo-mcp@63ae499` y se commitea. Deja de ser un
-   riesgo y pasa a ser el punto de partida de la réplica —posiblemente mejor que
-   el fork limpio, porque ya trae la integración con el AS externo hecha en Node.
+   Ese diff **es** el fuente perdido: se revisa, se commitea, y deja de ser un
+   riesgo para pasar a ser el punto de partida de la réplica —posiblemente mejor
+   que el fork limpio, porque ya trae la integración con el AS externo hecha en
+   Node.
 
-   Si el tarball ya no está (los buckets de staging tienen ciclo de vida), queda
-   la vía de último recurso: `docker pull` de la imagen y extraer
-   `/app/packages/odoo-mcp/dist` — es JavaScript compilado desde TypeScript, sin
-   minificar, perfectamente legible.
+   **Vía del tarball de Cloud Build (parcial).** `gcloud builds list` del
+   28-jul-2026 devolvió 20 builds, de los cuales **19 tienen `source` vacío** —
+   son builds con `repoSource`, disparados por trigger, como los de
+   `rosa-control-center`. Solo uno trae tarball:
+   `gs://odoo-serverless-ss-001_cloudbuild/source/1785192752.084703-aded13c697ae43bfac3563205bc9d7fb.tgz`,
+   del 27-jul 22:52 UTC. Esa hora cae **dentro de la ventana en que se escribió
+   `sellside-oauth`** (21:36–23:22), así que probablemente sea el AS en Python y
+   no el MCP. Se distingue al descomprimirlo: `auth_server/` → es el AS;
+   `packages/` → es el MCP. En cualquiera de los dos casos es fuente sin
+   versionar que hay que rescatar.
+
+   Dato colateral del mismo listado: **no hay ningún build a la hora de la
+   revisión `00016`** (28-jul 00:33 UTC). Eso confirma que esa revisión salió de
+   un `gcloud run services update`, no de un despliegue — coherente con que sea
+   el script 03 corriendo, que es lo que dejó las cuatro variables inertes de
+   §3.10(d).
 
 1b. **Si `sellside-auth` está desplegado.** El MCP tiene `AUTH_SERVER` apuntando
    a `https://sellside-auth-843056793102.southamerica-west1.run.app` y valida
