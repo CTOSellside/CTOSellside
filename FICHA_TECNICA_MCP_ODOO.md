@@ -491,41 +491,69 @@ Contrastando esas respuestas contra el fuente del fork, la imagen resulta ser
 | `cache-control: no-store` | no lo emite (`:269-278`) | presente | ⚠️ modificado |
 | Arranque sin `MCP_ENCRYPTION_KEY` | `exit(1)` (`config.ts:94-104`) | arranca | ⚠️ modificado |
 
-La conclusión es inequívoca: alguien tomó el fork, **parametrizó el `realm` y la
-URL de metadatos con `RESOURCE_NAME`/`RESOURCE_URI`, relajó la validación de
-entorno y lo apuntó al AS externo** vía `AUTH_SERVER`. Es decir: **la
-integración con `sellside-auth` ya se hizo, en Node, y funciona.** El desajuste
-Node/Python de §5 fue resuelto por alguien — pero la solución **no está en
-ningún repositorio**.
+**El fuente fue recuperado.** Extraído de la imagen en ejecución
+(`sha256:12dadcc9…`) el 28-jul-2026 y publicado en el repositorio privado
+**`CTOSellside/odoo-mcp-sellside`**, rama `rescate/oauth21`. Lo que sigue sale de
+leerlo, ya no de inferirlo por cabeceras HTTP.
 
-Eso reordena dos cosas de este documento:
+**No es un parche improvisado: es una migración deliberada y bien hecha.** El
+build es v0.2.2 con exactamente cinco archivos modificados —el resto de las
+diferencias son fines de línea— más un directorio nuevo y un pipeline:
 
-- **La buena:** el MCP **sí exige token**. El 401 con `WWW-Authenticate` bien
-  formado descarta el peor escenario. El sondeo a Odoo funciona (`probe_ok:true`)
-  y el servicio no se está reiniciando.
-- **La mala:** lo que hoy toca los datos de Odoo es un artefacto **no auditable
-  y no reproducible**. No se puede revisar, ni parchear, ni rebuildear, ni
-  replicar. Si esa imagen desaparece de Artifact Registry, el sistema no se puede
-  reconstruir. Y como el user store ya no está en juego (el build lo eliminó o lo
-  dejó sin usar, coherente con que faltan sus dos variables), tampoco sabemos
-  **dónde valida los tokens** ni qué hace con las credenciales.
+| Cambio | Detalle |
+|---|---|
+| **Eliminados** | `oauth.ts`, `user-store.ts`, `encryption.ts`, `consent-page.ts`, `admin.ts`, `client-cache.ts`, `cli-auth.ts`, `cli-users.ts` — **el servidor de autorización embebido completo** |
+| **Añadido** | `src/resource-server/` — 553 líneas, port a TypeScript de `mcp_resource_server/` del PR #1 |
+| **Modificados** | `http-transport.ts` (234 l.), `bin.ts` (209 l.), `server.ts` (134 l.), `config.ts` (79 l.), `types.ts` (24 l.) |
+| **Nuevo** | `cloudbuild-odoo-mcp.yaml` — el pipeline de despliegue |
 
-**Probablemente sea recuperable.** El repositorio de Artifact Registry se llama
-`cloud-run-source-deploy`, que es el nombre que Cloud Run usa para los despliegues
-`--source`. Eso implica que hubo un Cloud Build, y que **el tarball del fuente
-quedó en el bucket de staging** (`gs://<proyecto>_cloudbuild/source/…`). Ver
-[Anexo A](#anexo-a--qué-verifiqué-y-qué-no) para los comandos.
+Es decir: **el desajuste Node/Python de §5 ya está resuelto.** Alguien portó el
+resource server de Python a TypeScript y lo cableó. La calidad del port es buena:
 
-#### (b) `Min: 0` — el arranque en frío es rutina, no excepción
+- **`verifier.ts`** — verificación de JWT con `jose`: lista blanca `RS256`
+  (cierra `alg:none` y la confusión HS256), descubrimiento del JWKS con
+  comprobación de que el `issuer` publicado coincide con el configurado,
+  **comparación exacta de `aud` contra la URI canónica**, y `requiredClaims`
+  sobre `exp/iat/iss/aud/sub`. El `AccessToken` **no conserva el JWT original**,
+  así que no hay nada que reenviar a Odoo aunque se quisiera — es la prohibición
+  de passthrough hecha estructura, no disciplina.
+- **`scopes.ts`** — mapa herramienta → scope para las 10 herramientas, con
+  denegar-por-defecto. `odoo_execute` y `odoo_call_action` exigen `odoo:write`
+  porque invocan métodos arbitrarios y no se puede saber de antemano si escriben:
+  es el lado seguro del error.
+- **`server.ts:72-131`** — la política está **realmente conectada**, y por
+  partida doble: un `Proxy` sobre `registerTool` filtra el catálogo para que
+  `tools/list` anuncie solo lo usable, **y cada `tools/call` revalida el scope
+  contra el token de esa petición**. Lo segundo cubre el caso de una sesión HTTP
+  abierta con un token y reutilizada después con otro.
+- **`config.ts`** — no «relajó» la validación: **retiró las variables** que ya no
+  aplican y agregó una lista `RETIRED_ENV_VARS` que **avisa si alguna sigue
+  puesta**, precisamente para que nadie crea que el servicio está protegido por
+  algo que ya no hace nada. Y falla cerrado: `loadResourceConfig` lanza si faltan
+  `RESOURCE_URI` o `AUTH_SERVER`, así que el servidor **se niega a arrancar si no
+  puede validar tokens**.
 
-El servicio escala a cero. Combinado con la ausencia de volúmenes, esto convierte
-el defecto de §6.3 de «se pierde si reinicia» a **«se pierde cada vez que el
-servicio queda ocioso»**. Si la pieza A es la que corre, todo usuario que vuelva
-después de un rato de inactividad recibe 401 y tiene que rehacer el flujo OAuth.
+Corrijo entonces lo que escribí antes con menos información: caractericé esto
+como «un build que relajó la validación». Es lo contrario — es una migración de
+un AS embebido a uno externo, documentada en el propio código, y con el modelo de
+autorización más estricto que el original.
 
-Esto encaja con la explicación (a.2): un build que quitó la validación
-probablemente también prescindió del user store, porque con `Min: 0` sería
-inusable.
+**Lo que sí era cierto y sigue siéndolo:** hasta hoy ese fuente no estaba en
+ningún repositorio. Ya lo está, pero el trabajo no termina ahí — ver §9.
+
+#### (b) `Min: 0` — sin consecuencia para este build
+
+Escrito antes de recuperar el fuente, esto era un riesgo serio: el servicio
+escala a cero y no tiene volúmenes, así que un user store en disco se perdería en
+cada arranque en frío.
+
+**Ya no aplica al servicio actual.** El build eliminó `user-store.ts` por
+completo: no hay estado en disco que perder. Las sesiones se validan contra JWT
+firmados por el AS externo, y el JWKS se re-descubre solo.
+
+Sigue aplicando, en cambio, a **cualquier réplica construida desde el fork
+limpio**, que es de lo que trata §6.3. La conclusión práctica está en §6.1: la
+base correcta para replicar ya no es el fork, sino este repositorio.
 
 #### (c) El escalado se contradice consigo mismo
 
@@ -608,39 +636,54 @@ segundo.
 
 ---
 
-## 5. Pieza C — `sellside-oauth`, y el desajuste que hay que resolver
+## 5. Pieza C — `sellside-oauth`, el AS externo
 
 PR #1, sin mergear. Un servidor de autorización OAuth 2.1 **externo** en Python
 (FastAPI + Firestore), pensado como AS compartido para cinco MCP, más una
-librería de resource server que cada MCP montaría como middleware ASGI.
+librería de resource server.
 
 Está bien hecho: 41 tests en verde, PKCE S256 obligatorio, `aud` canónica por
 RFC 8707, refresh rotativo con revocación en cadena, sin passthrough del token,
 scopes con denegar-por-defecto. El detalle está en el cuerpo del PR #1.
 
-**Pero hay un desajuste de arquitectura que este documento tiene que dejar
-anotado:**
+**Y está en producción.** El servicio `sellside-auth` es el `AUTH_SERVER` contra
+el que `odoo-mcp-sellside` valida sus tokens hoy (§3.10a). El PR #1 lista como
+pendiente «Integrar el middleware en el código real de `odoo-mcp-sellside`» — esa
+integración **ya se hizo**, portando `mcp_resource_server/` de Python a
+TypeScript, y el port vive en `CTOSellside/odoo-mcp-sellside`.
 
-El middleware de `sellside-oauth` es **Python ASGI**. El MCP que corre en
-producción, `odoo-mcp-sellside`, es **Node/TypeScript** — confirmado en la
-[sección 3.1](#31-identificación-y-confirmación). Un middleware ASGI no se monta
-sobre un servidor `node:http`. Integrarlo exige una de tres:
+Queda entonces un problema de forma, no de fondo: **el AS corre desde un PR sin
+mergear, y su resource server desde una rama de rescate.** Dos servicios
+productivos cuya rama canónica no existe. Es el mismo riesgo de §3.10(a),
+duplicado.
 
-1. **Portar** `mcp_resource_server/` a TypeScript y montarlo en
-   `http-transport.ts`.
-2. Poner un **proxy Python delante** del MCP en Cloud Run (sidecar o servicio
-   intermedio) que valide el token y reenvíe.
-3. **No integrarlo** y usar el AS que la pieza A ya trae embebido.
+> **Nota de corrección.** Una versión anterior de este documento afirmaba que
+> había un desajuste Node/Python irresuelto y proponía tres salidas. Estaba
+> escrito antes de recuperar el fuente y era incorrecto: la salida 1 —portar el
+> middleware a TypeScript— ya estaba tomada y funcionando. Se deja anotado
+> porque la conclusión afectaba a la recomendación de réplica.
 
-El propio PR #1 lo lista como pendiente —«Integrar el middleware en el código
-real de `odoo-mcp-sellside` (no está en este repo)»— pero no señala que el
-lenguaje no coincide. Es una decisión que hay que tomar antes de invertir más en
-esa vía.
+### 5.1 Y hay un tercer MCP: `odoo-mcp-mom`
 
-Y hay una duplicación de fondo: **la pieza A ya es un servidor de autorización
-OAuth 2.1 completo**. `sellside-auth` solo se justifica si de verdad quieres *un*
-AS para cinco MCP distintos con identidad delegada a Google Sign-In. Si el
-objetivo es exponer el MCP de Odoo a Claude, la pieza A ya lo resuelve sola.
+Descubierto en los comentarios de `cloudbuild-odoo-mcp.yaml:12-17`, del propio
+repositorio rescatado:
+
+> *«Ya no se despliega `odoo-mcp-mom` desde aquí. Ese servicio sigue corriendo la
+> imagen anterior (`…/odoo-mcp`) y se autentica con `MCP_STATIC_TOKEN`, que este
+> código ya no acepta.»*
+
+Es decir, el patrimonio tiene **un cuarto MCP** que no aparecía en el mapa de §2:
+
+| Servicio | Odoo | Auth | Estado |
+|---|---|---|---|
+| `odoo-mcp-sellside` | Sellside | OAuth 2.1 contra `sellside-auth` | Migrado |
+| **`odoo-mcp-mom`** | **MOM** | **`MCP_STATIC_TOKEN` compartido** | **Sin migrar** |
+| MCP dentro de `rosa-control-center` | MOM | ninguna | Prototipo |
+
+`odoo-mcp-mom` no se ha verificado en este documento: no sé su configuración, su
+service account, ni si está abierto a internet. **Es el primer hueco que hay que
+cerrar en el inventario** — y un token estático compartido sobre un Odoo con
+`odoo_unlink` merece la misma atención que se le dio a `odoo-mcp-sellside`.
 
 ---
 
@@ -650,15 +693,34 @@ objetivo es exponer el MCP de Odoo a Claude, la pieza A ya lo resuelve sola.
 
 | | **Opción 1 — OAuth embebido** | **Opción 2 — AS externo** |
 |---|---|---|
-| Qué despliegas | Solo la pieza A | Pieza A + `sellside-auth` + integración |
+| Base de código | Fork limpio `CTOSellside/odoo-mcp` | **`CTOSellside/odoo-mcp-sellside`** + `sellside-oauth` |
 | Identidad del usuario | Email + API key de Odoo, en la pantalla de consentimiento | Google Sign-In del dominio del cliente |
-| Esfuerzo | Un `gcloud run deploy` | Portar el middleware (ver sección 5) |
+| Credencial contra Odoo | **Una por usuario final**, cifrada en reposo | **Una del servidor**, compartida |
+| Autorización | Allowlist de emails | **Scopes por herramienta**, denegar-por-defecto |
+| Estado en disco | User store JSON → problema en Cloud Run (§6.3) | **Ninguno** — JWT verificados contra el JWKS del AS |
 | Escala | Un AS por MCP | Un AS para N MCP |
-| Estado | **Funciona hoy, en producción** | Sin desplegar, con un desajuste abierto |
+| Esfuerzo | Un `gcloud run deploy` | Dos servicios + un cliente OAuth de Google |
+| Estado | Código upstream, **nunca desplegado por nosotros** | **Corriendo en producción hoy** |
 
-**Recomendación: Opción 1 para el primer cliente replicado.** La opción 2 solo
-paga si el cliente va a tener varios MCP (Odoo + Twilio + SendGrid + …) y quiere
-una sola pantalla de login corporativa. No empieces por ahí.
+**Recomendación: Opción 2.** Esto cambió respecto de la primera versión de este
+documento, y el motivo es el fuente recuperado (§3.10a): la opción 2 no es un
+proyecto por empezar, es lo que ya está funcionando, con el modelo de
+autorización más estricto y sin el defecto de estado en disco que arrastra la
+opción 1 en Cloud Run.
+
+Lo que hay que hacer para replicarla no es construir nada nuevo, sino
+**parametrizar lo que existe**: el issuer, la URI del recurso, el dominio de
+correo permitido y el cliente OAuth de Google. La pieza A sigue siendo relevante
+como referencia —y su modo `stdio` como piloto de bajo riesgo—, pero ya no es la
+base de despliegue.
+
+> El runbook de §6.5 quedó escrito para la opción 1 y **sirve de estructura, no
+> de receta**: las fases 1, 2, 4, 5 y 6 son equivalentes; cambia el conjunto de
+> secretos (sin `MCP_ENCRYPTION_KEY` ni `MCP_ADMIN_PASSWORD`, con las variables
+> del resource server) y se agrega el despliegue del AS. La fuente autoritativa
+> para esa parte es `sellside-oauth/deploy/` más
+> `cloudbuild-odoo-mcp.yaml` del repositorio rescatado — que ya trae el pipeline
+> completo y, deliberadamente, **no** pasa `--allow-unauthenticated`.
 
 ### 6.2 Inventario de recursos GCP por cliente
 
@@ -908,53 +970,66 @@ Ordenados por lo que le pasa al cliente si no se atienden.
 
 | # | Riesgo | Impacto | Dónde |
 |---|---|---|---|
-| 1 | **El fuente de lo desplegado no está versionado** | La imagen `:oauth21` es el fork con modificaciones que no están en ningún repo. No se puede auditar, parchear, rebuildear ni replicar lo que hoy toca los datos de Odoo | §3.10(a) |
-| 2 | **`/mcp/sse` de Rosa sin autenticación** | Escritura y borrado en Odoo MOM desde internet, sin credencial | §4 |
+| 1 | **`/mcp/sse` de Rosa sin autenticación** | Escritura y borrado en Odoo MOM desde internet, sin credencial | §4 |
+| 2 | **`odoo-mcp-mom` con token estático compartido** | Cuarto MCP sin auditar, con un secreto único no revocable por persona sobre un Odoo con `odoo_unlink` | §5.1 |
 | 3 | **Corre con la service account default de compute** | Rol `Editor` sobre todo el proyecto: un compromiso del MCP no se queda en Odoo | §3.10(e) |
-| 4 | User store efímero + `Min: 0` | El build desplegado parece haberlo eliminado, así que aplica a la **réplica**, no al servicio actual | §6.3, §3.10(b) |
+| 4 | **Dos servicios productivos sin rama canónica** | `sellside-auth` corre desde un PR sin mergear; el resource server desde una rama de rescate. Nadie puede rebuildear con confianza | §5, §3.10(a) |
 | 5 | `ODOO_API_KEY` viene de `SELLSIDE_ODOO_PASSWORD` | Si es la contraseña web y no una clave API: no es revocable por separado y sirve para entrar por la UI | §3.10(f) |
-| 6 | **Los access tokens no expiran** | Un token filtrado sirve hasta que alguien lo revoque a mano | `docs/v0.2.1-oauth.md:146` |
-| 7 | Desajuste Node/Python del PR #1 | Ya materializado: el script 03 dejó variables inertes en producción | §5, §3.10(d) |
-| 8 | Startup probe TCP en vez de `/health` | Un contenedor que abre el puerto pero falla el sondeo a Odoo se marca sano | §3.10 |
-| 9 | Escalado contradictorio (Max 1 vs 5) | Si el efectivo fuera 5, dispara el riesgo 4 | §3.10(c) |
-| 10 | Rotación destructiva de `MCP_ENCRYPTION_KEY` | Rotar por higiene obliga a que todos reautoricen | `user-store.ts:317-334` |
-| 11 | Bug de concurrencia SSE en Rosa | Mensajes cruzados entre clientes | `mcp.routes.js:6` |
-| 12 | Dependencia de un fork upstream | Los parches de seguridad de NETLINKS no llegan solos | `CTOSellside/odoo-mcp` |
-| 13 | `resolveToken` es O(n) | Irrelevante hoy (n ≤ 10 × usuarios); no escala a miles | `user-store.ts:250-257` |
+| 6 | Startup probe TCP en vez de `/health` | Un contenedor que abre el puerto pero falla el sondeo a Odoo se marca sano | §3.10 |
+| 7 | Escalado contradictorio (Max 1 vs 5) | Sin consecuencia hoy —no hay estado en disco— pero indica configuración a la deriva | §3.10(c) |
+| 8 | Variables inertes en producción | El script 03 dejó `SCOPES_SUPPORTED` etc. sobre un servicio que ya las lee de otra forma; `config.ts` avisa, pero conviene limpiarlas | §3.10(d) |
+| 9 | Bug de concurrencia SSE en Rosa | Mensajes cruzados entre clientes | `mcp.routes.js:6` |
+| 10 | Dependencia de un fork upstream | Los parches de seguridad de NETLINKS no llegan solos a ninguna de las dos ramas | `CTOSellside/odoo-mcp` |
+| 11 | User store efímero + `Min: 0` | **Ya no aplica al servicio actual.** Aplica solo a una réplica construida desde el fork limpio | §6.3, §3.10(b) |
 
-**Los tres primeros son los que importan, y el orden cambió** tras verificar el
-despliegue. El sondeo confirmó que el MCP **sí exige token** —el peor escenario
-está descartado—, pero dejó el riesgo 1 como el más grave: hay código sin
-control de versiones tocando datos de un ERP productivo, y recuperarlo es
-condición previa para replicar cualquier cosa.
+**El orden cambió dos veces**, y conviene decir por qué. En la primera versión el
+riesgo 1 era el user store efímero; tras verificar el despliegue pasó a ser «no
+se sabe qué código corre»; y tras recuperar el fuente ambos se disolvieron —el
+primero porque el build no tiene estado en disco, el segundo porque el código ya
+está versionado y resultó ser mejor de lo que aparentaba.
+
+Lo que queda arriba es lo que **no** se ha tocado: dos MCP sobre el Odoo de MOM
+con autenticación débil o nula, y una service account con permisos de más.
 
 ---
 
 ## 9. Recomendación
 
-0. **Recuperar el fuente de la imagen `:oauth21`** desde el tarball de Cloud
-   Build (Anexo A, punto 1), diffearlo contra el fork y commitearlo. Va antes que
-   todo lo demás: es código sin control de versiones tocando un ERP productivo, y
-   además —si trae la integración con `sellside-auth` hecha en Node— es
-   probablemente **la mejor base para la réplica**, mejor que el fork limpio del
-   §6.5. Lo mismo para `sellside-auth`.
-1. **Cerrar `/mcp/*` de Rosa Control Center.** Es una exposición activa, no una
-   deuda. No espera a la réplica.
-1b. **Darle al MCP una service account dedicada** en vez de la default de
-   compute, con permisos mínimos. Es un `gcloud run services update`.
-2. **Portar `UserStore` a Firestore** (opción C de §6.3). Es lo que convierte
-   esto de «funciona en una instancia» a «producto replicable».
-3. **Para el primer cliente replicado, Opción 1** — OAuth embebido, un proyecto,
-   `min=max=1` hasta que esté el punto 2. El runbook de §6.5 es ejecutable tal
-   cual.
-4. **Decidir sobre `sellside-oauth` antes de invertirle más.** Si la respuesta es
-   «un AS para cinco MCP», hay que portar el middleware a TypeScript. Si es «solo
-   Odoo», el PR #1 se archiva y se documenta por qué.
-5. **Correr la revisión externa que ya está escrita** —
-   `sellside-oauth/REVISION-EXTERNA.md`— antes de cualquier decisión sobre el
-   punto 4.
-6. **Anclar el fork.** Fijar la versión upstream que corremos y suscribirse a sus
-   releases, o adoptar el código formalmente. Hoy no hay ninguna de las dos.
+### Seguridad — no espera a la réplica
+
+1. **Cerrar `/mcp/*` de Rosa Control Center.** Exposición activa, sin
+   autenticación, sobre un Odoo productivo.
+2. **Auditar `odoo-mcp-mom`** (§5.1) y migrarlo al mismo modelo que
+   `odoo-mcp-sellside`. El pipeline ya contempla el paso: darle su `AUTH_SERVER`
+   y su `RESOURCE_URI` y devolver el despliegue a `cloudbuild-odoo-mcp.yaml`.
+3. **Service account dedicada** para los MCP en vez de la default de compute, con
+   permisos mínimos. Es un `gcloud run services update --service-account`.
+4. **Confirmar qué hay dentro de `SELLSIDE_ODOO_PASSWORD`.** Si es una contraseña
+   y no una clave API, reemplazarla por una clave API de un `mcp_user` dedicado.
+
+### Gobierno del código — condición previa para replicar
+
+5. **Consolidar `CTOSellside/odoo-mcp-sellside`.** La rama `rescate/oauth21` es
+   un rescate, no una rama canónica: revisarla, mergearla a `main`, y **conectar
+   el trigger de Cloud Build a `cloudbuild-odoo-mcp.yaml`** para que el próximo
+   despliegue salga de un commit y no de un `docker build` manual.
+6. **Mergear el PR #1** para que `sellside-auth` tenga rama canónica. Antes,
+   **correr la revisión externa que ya está escrita** en
+   `sellside-oauth/REVISION-EXTERNA.md` — sigue pendiente y ahora hay más
+   superficie que revisar, incluido el port a TypeScript.
+7. **Anclar el upstream.** Registrar que la base es `@netlinksinc/odoo-mcp`
+   v0.2.2 (`63ae499`) y suscribirse a sus releases, o adoptar el código
+   formalmente. Hoy no hay ninguna de las dos, y el fork ya divergió.
+
+### Réplica
+
+8. **Replicar con la Opción 2** (§6.1): `odoo-mcp-sellside` + `sellside-oauth`,
+   parametrizando issuer, URI del recurso, dominio de correo y cliente OAuth de
+   Google. No hay que construir nada nuevo — pero sí hacer primero el punto 5,
+   porque no se replica desde una rama de rescate.
+9. **Portar `UserStore` a Firestore** solo si además se quiere ofrecer la Opción 1
+   (credencial de Odoo por usuario final). No es necesario para la Opción 2, que
+   no tiene estado en disco.
 
 ---
 
@@ -970,91 +1045,79 @@ leído de lo supuesto no sirve para decidir.
   referencia `archivo:línea` de este documento apunta a ese commit.
 - Toda la pieza B: `rosa-control-center` en `9e54001`, incluido `cloudbuild.yaml`.
 - Pieza C: rama `claude/oauth-mcp-sellside-gcp-gg30q6` del PR #1.
-- **Que el conector vivo `Rosa_Odoo_MCP_GCP` corre el *código* de la pieza A**:
-  los esquemas expuestos coinciden con `schemas.ts` en regex, defaults y cadenas
-  de descripción (§3.1). Esto identifica el código, **no el servicio que lo
-  aloja** — ver el punto 1 de abajo.
 - **La configuración desplegada de `odoo-mcp-sellside`** (§3.10), vía
-  `gcloud run services describe` el 28-jul-2026.
+  `gcloud run services describe` el 28-jul-2026, más el sondeo de `/health`,
+  `/mcp` y los logs.
+- **El fuente exacto del build en producción** — extraído de la imagen
+  `sha256:12dadcc9a48aa15ef0787a00658bb87b76162261f270d60ad471b811b37403ca` y
+  publicado en `CTOSellside/odoo-mcp-sellside@rescate/oauth21`. Diffeado archivo
+  por archivo contra `CTOSellside/odoo-mcp@63ae499`, normalizando fines de línea.
+  Las referencias de §3.10(a) apuntan a ese árbol.
 
 ### No verificado — supuestos declarados
 
-1. **El fuente exacto detrás del tag `:oauth21`.** Resuelto parcialmente: §3.10(a)
-   demuestra por comportamiento observable que es el fork con modificaciones
-   locales, y que **exige token**. Lo que sigue sin saberse es el **código**: qué
-   más se cambió además de lo que asoma en las cabeceras HTTP, dónde valida los
-   tokens, y qué hace con las credenciales de Odoo ahora que el user store no
-   tiene sus variables.
+1. **Que la imagen `:oauth21` sea la que sirve la revisión activa.** La revisión
+   `00016` referencia ese tag, y el comportamiento observado (realm
+   `odoo-mcp-sellside`, ruta de metadatos con sufijo, arranque sin
+   `MCP_ENCRYPTION_KEY`) coincide con el fuente rescatado en los cuatro puntos que
+   lo distinguen del fork. La coincidencia es suficiente para trabajar, pero es
+   un tag mutable: quien pueda escribir en Artifact Registry puede reapuntarlo.
+   **Ese es justamente el motivo del punto 5 de §9** — desplegar por `$COMMIT_SHA`,
+   como ya prevé `cloudbuild-odoo-mcp.yaml:25`, y no por tag.
 
-   El fork no contiene configuración de despliegue para GCP —solo `Dockerfile` y
-   `fly.toml`— y el tag es manual, no un SHA.
-
-   **Vía de recuperación (garantizada).** El `Dockerfile` del fork hace `COPY . .`
-   **antes** de compilar (`Dockerfile:18`), así que la imagen contiene el árbol de
-   fuentes TypeScript completo, no solo el `dist`:
+2. **`odoo-mcp-mom`** (§5.1). Descubierto en un comentario del pipeline; no
+   inspeccionado. Se desconocen su configuración, su service account, su política
+   IAM y de dónde salió su imagen. Es el hueco más grande que queda:
    ```bash
-   IMG=southamerica-west1-docker.pkg.dev/odoo-serverless-ss-001/cloud-run-source-deploy/odoo-mcp-sellside:oauth21
-   gcloud auth configure-docker southamerica-west1-docker.pkg.dev -q
-   docker pull -q "$IMG"
-   mkdir -p /tmp/oauth21 && docker run --rm --entrypoint sh "$IMG" -c \
-     'cd /app && tar c --exclude=node_modules packages/*/src packages/odoo-mcp/package.json Dockerfile' \
-     | tar x -C /tmp/oauth21
-   git clone --depth 1 https://github.com/CTOSellside/odoo-mcp /tmp/upstream
-   diff -ru /tmp/upstream/packages /tmp/oauth21/packages
+   gcloud run services describe odoo-mcp-mom --region southamerica-west1
+   gcloud run services get-iam-policy odoo-mcp-mom --region southamerica-west1
    ```
-   Ese diff **es** el fuente perdido: se revisa, se commitea, y deja de ser un
-   riesgo para pasar a ser el punto de partida de la réplica —posiblemente mejor
-   que el fork limpio, porque ya trae la integración con el AS externo hecha en
-   Node.
 
-   **Vía del tarball de Cloud Build (parcial).** `gcloud builds list` del
-   28-jul-2026 devolvió 20 builds, de los cuales **19 tienen `source` vacío** —
-   son builds con `repoSource`, disparados por trigger, como los de
-   `rosa-control-center`. Solo uno trae tarball:
-   `gs://odoo-serverless-ss-001_cloudbuild/source/1785192752.084703-aded13c697ae43bfac3563205bc9d7fb.tgz`,
-   del 27-jul 22:52 UTC. Esa hora cae **dentro de la ventana en que se escribió
-   `sellside-oauth`** (21:36–23:22), así que probablemente sea el AS en Python y
-   no el MCP. Se distingue al descomprimirlo: `auth_server/` → es el AS;
-   `packages/` → es el MCP. En cualquiera de los dos casos es fuente sin
-   versionar que hay que rescatar.
-
-   Dato colateral del mismo listado: **no hay ningún build a la hora de la
-   revisión `00016`** (28-jul 00:33 UTC). Eso confirma que esa revisión salió de
-   un `gcloud run services update`, no de un despliegue — coherente con que sea
-   el script 03 corriendo, que es lo que dejó las cuatro variables inertes de
-   §3.10(d).
-
-1b. **Si `sellside-auth` está desplegado.** El MCP tiene `AUTH_SERVER` apuntando
-   a `https://sellside-auth-843056793102.southamerica-west1.run.app` y valida
-   tokens contra él, así que debe existir — pero el PR #1 no está mergeado, con
-   lo cual **también sería un despliegue sin fuente versionado**. Mismo problema,
-   segundo servicio:
+3. **`sellside-auth`.** Existe —el MCP valida contra él y el flujo funciona— pero
+   no se inspeccionó su despliegue, y su fuente sigue en un PR sin mergear:
    ```bash
    gcloud run services list --region southamerica-west1
-   curl -s https://odoo-mcp-sellside-843056793102.southamerica-west1.run.app/.well-known/oauth-protected-resource/mcp
+   curl -s https://sellside-auth-843056793102.southamerica-west1.run.app/.well-known/oauth-authorization-server | jq
    ```
 
-3. **Si `/mcp/sse` de Rosa está efectivamente alcanzable desde internet.** Lo
+4. **La política IAM de `odoo-mcp-sellside`.** `Ingress: all` confirma que la red
+   lo permite y el pipeline **no** pasa `--allow-unauthenticated`
+   (`cloudbuild-odoo-mcp.yaml:52`), pero el acceso público se abre a mano con
+   `05-abrir-acceso.sh` y `describe` no muestra los bindings. Que el sondeo desde
+   Cloud Shell haya recibido un `401` del código —y no un `403` de la
+   plataforma— sugiere que `allUsers` **sí** está concedido:
+   ```bash
+   gcloud run services get-iam-policy odoo-mcp-sellside --region southamerica-west1
+   ```
+
+5. **Si `/mcp/sse` de Rosa está efectivamente alcanzable desde internet.** Lo
    deduzco de `--allow-unauthenticated` en `cloudbuild.yaml:27` más la ausencia
    de middleware en `server.js:47-51`. No lo probé: sondear un endpoint de
    escritura sobre un Odoo productivo no es algo que se haga sin autorización
    explícita. **Recomiendo verificarlo hoy.**
 
-4. **El segundo proyecto GCP.** Solo conozco su número, `30942737227`, por las
+6. **El tarball de Cloud Build del 27-jul 22:52 UTC**
+   (`gs://odoo-serverless-ss-001_cloudbuild/source/1785192752.084703-…tgz`). Es el
+   único de los 20 builds listados con `storageSource` —los otros 19 usan
+   `repoSource`— y su hora cae dentro de la ventana en que se escribió
+   `sellside-oauth`, así que probablemente sea el AS en Python. Sin descomprimir.
+
+   Dato colateral del mismo listado: **no hay ningún build a la hora de la
+   revisión `00016`** (28-jul 00:33 UTC), lo que confirma que salió de un
+   `gcloud run services update` —el script 03— y no de un despliegue.
+
+7. **El segundo proyecto GCP.** Solo conozco su número, `30942737227`, por las
    URLs en el código. No sé su ID ni su relación organizativa con
    `odoo-serverless-ss-001`.
 
-4b. **La política IAM del servicio.** `Ingress: all` confirma que la red lo
-   permite, pero `describe` no muestra los bindings. Falta:
-   ```bash
-   gcloud run services get-iam-policy odoo-mcp-sellside --region southamerica-west1
-   ```
-   Si aparece `allUsers` con `roles/run.invoker`, la única protección es el
-   código — y el punto 1 dice que no sabemos cuál es.
+8. **Qué emite `sellside-auth` en el claim `scope`.** El resource server exige
+   `odoo:read` / `odoo:write` (`scopes.ts:16-17`), pero no verifiqué qué scopes
+   concede el AS ni con qué criterio. Si concediera siempre ambos, la política por
+   herramienta quedaría correctamente implementada y vacía de efecto.
 
-5. **Cuántos usuarios usan hoy el conector** y con qué frecuencia. Determina si
-   la opción A de §6.3 es tolerable como estado transitorio o ya está causando
-   incidentes que se atribuyen a otra cosa.
+9. **Los tests.** El rescate extrajo `packages/*/src`, no `packages/*/tests`. No
+   sé si el port a TypeScript trae pruebas propias ni si las 41 del PR #1 tienen
+   equivalente. Es lo primero que hay que mirar al consolidar la rama (§9, punto 5).
 
 ---
 
