@@ -1,6 +1,15 @@
 # MCP de Odoo — Descripción técnica y guía de réplica
 
 **Autor:** CTO Sellside · **Fecha:** 28 de julio de 2026 · **Estado:** vigente
+**Repositorio oficial:** `Sellside-SpA/rosa-control-center` (privado)
+
+> ⚠️ **Advertencia sobre la pieza B.** El análisis de Rosa Control Center (§4)
+> se hizo leyendo **`CTOSellside/rosa-control-center` en el commit `9e54001`**,
+> que **no es el repositorio oficial**. El oficial es
+> `Sellside-SpA/rosa-control-center`. Hasta contrastar ambos, todo lo que este
+> documento afirma sobre Rosa —incluido que `/mcp/sse` está sin autenticación—
+> debe tratarse como referido a un espejo posiblemente desactualizado. Ver
+> [Anexo A](#anexo-a--qué-verifiqué-y-qué-no), punto 5.
 
 Documento de arquitectura del conector MCP de Odoo tal como está construido hoy,
 escrito con el objetivo explícito de **replicarlo para otra empresa en otra cuenta
@@ -62,8 +71,10 @@ primero; `rosa-control-center/backend/test-remote.js:3` y
 
 | Repo | Rol | Estado |
 |---|---|---|
+| **`Sellside-SpA/rosa-control-center`** | **Repositorio oficial.** BFF + SPA, expone la pieza B, y hogar de este documento | **Canónico — no verificado en este análisis** |
 | `CTOSellside/odoo-mcp` | Fork de `NETLINKSAF/odoo-mcp` — el código de la pieza A | Sin modificaciones locales |
-| `CTOSellside/rosa-control-center` | BFF + SPA que además expone la pieza B | Activo |
+| `CTOSellside/odoo-mcp-sellside` | Fuente rescatado del build en producción (§3.10a) | Rama `rescate/oauth21`, por consolidar |
+| `CTOSellside/rosa-control-center` | **Espejo o fork** del oficial — es lo que se leyó para §4 | Posiblemente desactualizado |
 | `CTOSellside/CTOSellside` → `sellside-oauth/` | Pieza C, en PR #1 | Sin mergear |
 | `CTOSellside/odoo-mcp-integration` | — | **Vacío** (solo un README con el título) |
 | `CTOSellside/rosalia-odoo` | SPA React, cliente de Odoo | No participa del MCP |
@@ -1090,11 +1101,26 @@ leído de lo supuesto no sirve para decidir.
    gcloud run services get-iam-policy odoo-mcp-sellside --region southamerica-west1
    ```
 
-5. **Si `/mcp/sse` de Rosa está efectivamente alcanzable desde internet.** Lo
-   deduzco de `--allow-unauthenticated` en `cloudbuild.yaml:27` más la ausencia
-   de middleware en `server.js:47-51`. No lo probé: sondear un endpoint de
-   escritura sobre un Odoo productivo no es algo que se haga sin autorización
-   explícita. **Recomiendo verificarlo hoy.**
+5. **Toda la pieza B, por partida doble.**
+
+   **(a) Repositorio equivocado.** §4 se escribió leyendo
+   `CTOSellside/rosa-control-center@9e54001`, que **no es el oficial** — el
+   oficial es `Sellside-SpA/rosa-control-center`. No pude contrastarlos: el
+   entorno de esta sesión no permite adjuntar repositorios de otra organización.
+   Es posible que el espejo esté atrasado y que en el oficial `/mcp/*` ya tenga
+   autenticación. **Contrastar es lo primero:**
+   ```bash
+   git clone https://github.com/Sellside-SpA/rosa-control-center /tmp/oficial
+   diff -r /tmp/oficial/backend /tmp/espejo/backend
+   sed -n '40,60p' /tmp/oficial/backend/server.js       # ¿hay middleware antes de /mcp?
+   cat /tmp/oficial/backend/routes/mcp.routes.js
+   ```
+
+   **(b) Alcanzabilidad.** Aun en el espejo, que `/mcp/sse` esté efectivamente
+   abierto lo deduzco de `--allow-unauthenticated` en `cloudbuild.yaml:27` más la
+   ausencia de middleware en `server.js:47-51`. No lo probé: sondear un endpoint
+   de escritura sobre un Odoo productivo no es algo que se haga sin autorización
+   explícita.
 
 6. **El tarball de Cloud Build del 27-jul 22:52 UTC**
    (`gs://odoo-serverless-ss-001_cloudbuild/source/1785192752.084703-…tgz`). Es el
