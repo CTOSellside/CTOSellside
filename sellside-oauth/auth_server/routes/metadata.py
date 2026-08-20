@@ -28,7 +28,12 @@ async def authorization_server_metadata(request: Request) -> JSONResponse:
             "scopes_supported": list(settings.scopes_supported),
             "response_types_supported": ["code"],
             "response_modes_supported": ["query"],
-            "grant_types_supported": ["authorization_code", "refresh_token"],
+            "grant_types_supported": [
+                "authorization_code",
+                "refresh_token",
+                # M2M para agentes (RFC 7523): assertion = ID token de SA de Google.
+                "urn:ietf:params:oauth:grant-type:jwt-bearer",
+            ],
             "token_endpoint_auth_methods_supported": [
                 "none",
                 "client_secret_basic",

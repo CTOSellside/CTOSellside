@@ -11,6 +11,7 @@ from .context import AppContext
 from .errors import OAuthError, oauth_error_handler
 from .identity import DevIdentityProvider, GoogleIdentityProvider
 from .keys import SigningKey
+from .m2m import GoogleAssertionVerifier
 from .routes import authorize, metadata, register, revoke, token
 from .sessions import SessionManager
 from .storage import Storage, build_storage
@@ -59,6 +60,9 @@ def create_app(
         storage=storage or build_storage(settings),
         sessions=SessionManager(key, settings.issuer),
         idp=identity_provider or build_identity_provider(settings),
+        # Grant jwt-bearer M2M: las assertions se validan contra Google con
+        # `aud` = issuer de este AS (los tests inyectan su propio verifier).
+        m2m_verifier=GoogleAssertionVerifier(expected_audience=settings.issuer),
     )
 
     app.add_exception_handler(OAuthError, oauth_error_handler)

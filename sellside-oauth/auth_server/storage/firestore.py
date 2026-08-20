@@ -22,13 +22,19 @@ from datetime import datetime, timezone
 
 from google.cloud import firestore  # type: ignore[import-untyped]
 
-from ..models import AuthorizationCode, AuthorizationRequest, Client, RefreshToken, now
+from ..models import AuthorizationCode, AuthorizationRequest, Client, M2MClient, RefreshToken, now
 from . import Storage
 
 CLIENTS = "oauth_clients"
 AUTH_REQUESTS = "oauth_auth_requests"
 CODES = "oauth_codes"
 REFRESH = "oauth_refresh_tokens"
+# Grant jwt-bearer (RFC 7523). `m2m_clients` lo escribe SOLO infraestructura;
+# `rcc_as_seen_assertions` necesita TTL sobre `expire_at`:
+#     gcloud firestore fields ttls update expire_at \
+#         --collection-group=rcc_as_seen_assertions --enable-ttl
+M2M_CLIENTS = "m2m_clients"
+SEEN_ASSERTIONS = "rcc_as_seen_assertions"
 
 
 def _expire_at(epoch_seconds: int) -> datetime:
@@ -136,6 +142,23 @@ class FirestoreStorage(Storage):
 
     async def revoke_subject(self, subject: str) -> int:
         return await self._revoke_where("subject", subject)
+
+    # --- clientes M2M -------------------------------------------------------
+    async def get_m2m_client(self, sa_email: str) -> M2MClient | None:
+        snapshot = await self._db.collection(M2M_CLIENTS).document(sa_email.lower()).get()
+        if not snapshot.exists:
+            return None
+        return M2MClient.from_dict(snapshot.to_dict())
+
+    async def register_assertion(self, assertion_id: str, expires_at: int) -> bool:
+        payload = {"expire_at": _expire_at(expires_at), "registered_at": now()}
+        try:
+            # `create` es atómico: falla si el documento ya existe. Es la
+            # garantía write-once del anti-replay — nunca get-luego-set.
+            await self._db.collection(SEEN_ASSERTIONS).document(assertion_id).create(payload)
+            return True
+        except Exception:  # noqa: BLE001 - AlreadyExists (u otro fallo: denegar)
+            return False
 
     async def _revoke_where(self, field: str, value: str) -> int:
         query = (

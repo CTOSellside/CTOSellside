@@ -55,6 +55,37 @@ class Client:
 
 
 @dataclass
+class M2MClient:
+    """Cliente máquina-a-máquina del grant jwt-bearer (RFC 7523).
+
+    El documento vive en la colección `m2m_clients` y SOLO lo escribe
+    infraestructura (Terraform/operador con IAM de admin) — condición del
+    dictamen CISO: la SA de runtime del AS es read-only sobre esta colección
+    y cada alta/baja se audita fuera de este servicio.
+    """
+
+    sa_email: str
+    status: str = "active"  # active | suspended | revoked
+    allowed_scopes: list[str] = field(default_factory=list)
+    allowed_audiences: list[str] = field(default_factory=list)
+    description: str = ""
+    created_at: int = field(default_factory=now)
+    updated_at: int = field(default_factory=now)
+
+    @property
+    def is_active(self) -> bool:
+        return self.status == "active"
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "M2MClient":
+        known = {f for f in cls.__dataclass_fields__}  # tolera campos extra del doc
+        return cls(**{k: v for k, v in data.items() if k in known})
+
+
+@dataclass
 class AuthorizationRequest:
     """Petición /authorize a la espera de login y consentimiento."""
 
