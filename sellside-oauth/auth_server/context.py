@@ -9,6 +9,7 @@ from fastapi import Request
 from .config import Settings
 from .identity import DevIdentityProvider, GoogleIdentityProvider
 from .keys import SigningKey
+from .m2m import GoogleAssertionVerifier
 from .ratelimit import RegistrationRateLimiter
 from .sessions import SessionManager
 from .storage import Storage
@@ -27,6 +28,8 @@ class AppContext:
     storage: Storage
     sessions: SessionManager
     idp: GoogleIdentityProvider | DevIdentityProvider
+    # Grant jwt-bearer (M2M). None = grant deshabilitado (UnsupportedGrantType).
+    m2m_verifier: GoogleAssertionVerifier | None = None
     registration_limiter: RegistrationRateLimiter = field(
         default_factory=RegistrationRateLimiter
     )

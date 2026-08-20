@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 
-from ..models import AuthorizationCode, AuthorizationRequest, Client, RefreshToken, now
+from ..models import AuthorizationCode, AuthorizationRequest, Client, M2MClient, RefreshToken, now
 from . import Storage
 
 
@@ -20,6 +20,8 @@ class MemoryStorage(Storage):
         self._codes: dict[str, AuthorizationCode] = {}
         self._refresh: dict[str, RefreshToken] = {}
         self._revoked_families: set[str] = set()
+        self._m2m_clients: dict[str, M2MClient] = {}
+        self._seen_assertions: dict[str, int] = {}  # assertion_id -> expires_at
 
     async def create_client(self, client: Client) -> None:
         async with self._lock:
@@ -99,3 +101,25 @@ class MemoryStorage(Storage):
                     self._revoked_families.add(token.family_id)
                     count += 1
             return count
+
+    # --- clientes M2M -------------------------------------------------------
+    async def get_m2m_client(self, sa_email: str) -> M2MClient | None:
+        return self._m2m_clients.get(sa_email.lower())
+
+    async def save_m2m_client(self, client: M2MClient) -> None:
+        """Solo para tests/local: en producción escribe Terraform, no el AS."""
+
+        async with self._lock:
+            self._m2m_clients[client.sa_email.lower()] = client
+
+    async def register_assertion(self, assertion_id: str, expires_at: int) -> bool:
+        async with self._lock:
+            current = now()
+            # Limpieza perezosa de marcas vencidas (en Firestore lo hace el TTL).
+            self._seen_assertions = {
+                key: exp for key, exp in self._seen_assertions.items() if exp > current
+            }
+            if assertion_id in self._seen_assertions:
+                return False
+            self._seen_assertions[assertion_id] = expires_at
+            return True

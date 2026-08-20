@@ -29,6 +29,12 @@ from ..errors import (
     InvalidTarget,
     UnsupportedGrantType,
 )
+from ..m2m import (
+    ASSERTION_REPLAY_TTL_SECONDS,
+    JWT_BEARER_GRANT,
+    AssertionError_,
+    assertion_replay_id,
+)
 from ..models import Client, RefreshToken, hash_secret, now, random_token
 from ..pkce import verify_s256
 
@@ -43,6 +49,12 @@ async def token(request: Request) -> JSONResponse:
     form = dict(await request.form())
     grant_type = str(form.get("grant_type") or "")
 
+    # RFC 7523: en el grant jwt-bearer la assertion ES la autenticación del
+    # cliente (no hay client_id/secret registrado por /register).
+    if grant_type == JWT_BEARER_GRANT:
+        body = await _jwt_bearer_grant(context, form)
+        return JSONResponse(body, headers=NO_STORE)
+
     client = await _authenticate_client(context, request, form)
 
     if grant_type == "authorization_code":
@@ -55,6 +67,87 @@ async def token(request: Request) -> JSONResponse:
         raise UnsupportedGrantType(grant_type or "(vacío)")
 
     return JSONResponse(body, headers=NO_STORE)
+
+
+async def _jwt_bearer_grant(context: AppContext, form: dict) -> dict:
+    """Grant M2M para agentes (contrato: Odoo Knowledge art. 122).
+
+    Emite SOLO access token, sin refresh: un cliente M2M puede presentar una
+    assertion nueva cuando quiera, y un refresh token sería un secreto de
+    larga vida que este diseño existe para evitar.
+    """
+
+    assertion = str(form.get("assertion") or "")
+    if not assertion:
+        raise InvalidRequest("Falta assertion")
+
+    verifier = context.m2m_verifier
+    if verifier is None:
+        raise UnsupportedGrantType(JWT_BEARER_GRANT)
+
+    try:
+        claims = await verifier.verify(assertion)
+    except AssertionError_ as exc:
+        raise InvalidGrant(str(exc)) from exc
+
+    sa_email = str(claims["email"]).lower()
+    m2m = await context.storage.get_m2m_client(sa_email)
+    if m2m is None:
+        raise InvalidClient(f"{sa_email} no está registrado como cliente M2M")
+    if not m2m.is_active:
+        raise InvalidClient(f"El cliente M2M {sa_email} está {m2m.status}")
+
+    # Anti-replay write-once (condición CISO): una assertion, un solo canje.
+    replay_id = assertion_replay_id(assertion, claims)
+    fresh = await context.storage.register_assertion(
+        replay_id, now() + ASSERTION_REPLAY_TTL_SECONDS
+    )
+    if not fresh:
+        raise InvalidGrant("Assertion ya canjeada: posible replay")
+
+    # PoLP: lo pedido debe caber en lo registrado; lo emitido, además, en lo
+    # que el servidor soporta hoy. Sin `scope` explícito se emite el registro.
+    registered = set(m2m.allowed_scopes)
+    requested = set(str(form.get("scope") or "").split())
+    if requested and not requested <= registered:
+        raise InvalidScope("El cliente M2M pidió scopes fuera de su registro")
+    granted = (requested or registered) & set(context.settings.scopes_supported)
+    if not granted:
+        raise InvalidScope("Ningún scope habilitado para este cliente M2M")
+    scope = " ".join(sorted(granted))
+
+    # Audiencia: exacta y registrada. Con una sola audiencia registrada el
+    # `resource` es opcional; con varias, obligatorio.
+    audiences = {canonical_resource_uri(item) for item in m2m.allowed_audiences}
+    raw_resource = form.get("resource")
+    if raw_resource:
+        resource = _requested_resource(form, default="")
+    elif len(audiences) == 1:
+        resource = next(iter(audiences))
+    else:
+        raise InvalidTarget(
+            "Falta `resource` y el cliente M2M tiene varias audiencias registradas"
+        )
+    if resource not in audiences:
+        raise InvalidTarget("El `resource` no está entre las audiencias registradas del cliente")
+    if not context.settings.is_known_resource(resource):
+        raise InvalidTarget("El `resource` no está protegido por este AS")
+
+    access_token = _encode_access_token(
+        context,
+        client_id=sa_email,
+        subject=f"google-sa:{claims['sub']}",
+        email=sa_email,
+        resource=resource,
+        scope=scope,
+        session_id=f"m2m:{sa_email}",
+    )
+    return {
+        "access_token": access_token,
+        "token_type": "Bearer",
+        "expires_in": context.settings.access_token_ttl,
+        "scope": scope,
+    }
 
 
 async def _authorization_code_grant(context: AppContext, client: Client, form: dict) -> dict:
@@ -170,25 +263,14 @@ async def _issue_tokens(
 ) -> dict:
     settings = context.settings
     issued_at = now()
-    access_token = jwt.encode(
-        {
-            "iss": settings.issuer,
-            "sub": subject,
-            "aud": resource,
-            "client_id": client.client_id,
-            "scope": scope,
-            "email": subject_email,
-            # `sid` permite revocar por sesión cuando lo único que hay a mano es
-            # un access token (ver /revoke).
-            "sid": session_id,
-            "jti": random_token(16),
-            "iat": issued_at,
-            "nbf": issued_at,
-            "exp": issued_at + settings.access_token_ttl,
-        },
-        context.key.private_key,
-        algorithm="RS256",
-        headers={"kid": context.key.kid, "typ": "at+jwt"},
+    access_token = _encode_access_token(
+        context,
+        client_id=client.client_id,
+        subject=subject,
+        email=subject_email,
+        resource=resource,
+        scope=scope,
+        session_id=session_id,
     )
 
     refresh_token = random_token(32)
@@ -213,6 +295,40 @@ async def _issue_tokens(
         "refresh_token": refresh_token,
         "scope": scope,
     }
+
+
+def _encode_access_token(
+    context: AppContext,
+    *,
+    client_id: str,
+    subject: str,
+    email: str,
+    resource: str,
+    scope: str,
+    session_id: str,
+) -> str:
+    settings = context.settings
+    issued_at = now()
+    return jwt.encode(
+        {
+            "iss": settings.issuer,
+            "sub": subject,
+            "aud": resource,
+            "client_id": client_id,
+            "scope": scope,
+            "email": email,
+            # `sid` permite revocar por sesión cuando lo único que hay a mano es
+            # un access token (ver /revoke).
+            "sid": session_id,
+            "jti": random_token(16),
+            "iat": issued_at,
+            "nbf": issued_at,
+            "exp": issued_at + settings.access_token_ttl,
+        },
+        context.key.private_key,
+        algorithm="RS256",
+        headers={"kid": context.key.kid, "typ": "at+jwt"},
+    )
 
 
 def _requested_resource(form: dict, *, default: str) -> str:

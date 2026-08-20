@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from ..models import AuthorizationCode, AuthorizationRequest, Client, RefreshToken
+from ..models import AuthorizationCode, AuthorizationRequest, Client, M2MClient, RefreshToken
 
 
 class Storage(ABC):
@@ -66,6 +66,20 @@ class Storage(ABC):
 
     @abstractmethod
     async def find_refresh_token(self, token_hash: str) -> RefreshToken | None: ...
+
+    # --- clientes M2M (grant jwt-bearer, RFC 7523) --------------------------
+    # Este servicio SOLO LEE `m2m_clients`; las altas/bajas son de Terraform.
+    @abstractmethod
+    async def get_m2m_client(self, sa_email: str) -> M2MClient | None: ...
+
+    @abstractmethod
+    async def register_assertion(self, assertion_id: str, expires_at: int) -> bool:
+        """Marca write-once de anti-replay (condición CISO).
+
+        Devuelve True si la assertion se registró por primera vez; False si ya
+        existía (replay: quien llama DEBE rechazar el canje). La implementación
+        tiene que ser un create atómico — nunca un get-luego-set.
+        """
 
 
 def build_storage(settings) -> Storage:  # noqa: ANN001 - evita import circular
