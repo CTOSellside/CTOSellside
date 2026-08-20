@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# Material sensible que termina en el directorio de trabajo con facilidad: la
+# llave de firma y el JSON del cliente OAuth que descarga la consola.
+*.pem
+client_secret*.json
+*.apps.googleusercontent.com.json

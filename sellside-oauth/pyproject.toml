@@ -1,0 +1,27 @@
+[project]
+name = "sellside-oauth"
+version = "0.1.0"
+description = "OAuth 2.1 authorization server (sellside-auth) y librería de resource server para los MCP de Sellside"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "pyjwt[crypto]>=2.8",
+    "httpx>=0.27",
+    "python-multipart>=0.0.9",
+]
+
+[project.optional-dependencies]
+firestore = ["google-cloud-firestore>=2.16"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["auth_server", "auth_server.routes", "auth_server.storage", "mcp_resource_server"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
